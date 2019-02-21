@@ -29,7 +29,7 @@ typedef unsigned int uint;
 
 inline double sqr(double x)	    { return x*x;			       }
 inline bool seq(const char *s1, const char *s2) { return strcmp(s1,s2) == 0;	       }
-inline bool onebit(uint m)	    { return (m != 0) && ((m & m-1) == 0);     }
+inline bool onebit(uint m)	    { return (m != 0) && ((m & (m-1)) == 0);     }
 
 inline double asinh(double x)
   { /* Microsoft C++ does not define */
@@ -107,9 +107,6 @@ static void compute_notch(), compute_apres();
 static complex reflect(complex);
 static void compute_bpres(), add_extra_zero();
 static void expandpoly(), expand(complex[], int, complex[]), multin(complex, int, complex[]);
-static void printresults(char*[]), printcmdline(char*[]), printfilter(), printgain(const char*, complex);
-static void printcoeffs(const char*, int, double[]);
-static void printrat_s(), printrat_z(), printpz(complex*, int), printrecurrence(), prcomplex(complex);
 
 
 void mkfilter_process(
@@ -118,7 +115,9 @@ void mkfilter_process(
     std::vector<double>& argCoefIn, 
     std::vector<double>& argCoefOut, 
     double& argGain)
-  { readcmdline(argv);
+  { 
+    (void)argc;
+    readcmdline(argv);
     checkoptions();
     setdefaults();
     if (options & opt_re)
@@ -144,7 +143,6 @@ void mkfilter_process(
     expandpoly();
 
     //Assign results
-    //printresults(argv);
     complex gain = (options & opt_pi) ? hf_gain :
         (options & opt_lp) ? dc_gain :
         (options & opt_hp) ? hf_gain :
@@ -153,10 +151,10 @@ void mkfilter_process(
     argGain = hypot(gain);
     argCoefIn.assign(zplane.numzeros+1, 0.0);
     argCoefOut.assign(zplane.numpoles+1, 0.0);
-    for (size_t i=0;i<zplane.numzeros+1;i++) {
+    for (size_t i=0;i<(size_t)zplane.numzeros+1;i++) {
         argCoefIn[zplane.numzeros-i] = xcoeffs[i];
     }
-    for (size_t i=0;i<zplane.numpoles;i++) {
+    for (size_t i=0;i<(size_t)zplane.numpoles;i++) {
         argCoefOut[zplane.numpoles-i] = ycoeffs[i];
     }
   }
@@ -526,111 +524,5 @@ static void multin(complex w, int npz, complex coeffs[])
     complex nw = -w;
     for (int i = npz; i >= 1; i--) coeffs[i] = (nw * coeffs[i]) + coeffs[i-1];
     coeffs[0] = nw * coeffs[0];
-  }
-
-static void printresults(char *argv[])
-  { if (options & opt_l)
-      { /* just list parameters */
-	printcmdline(argv);
-	complex gain = (options & opt_pi) ? hf_gain :
-		       (options & opt_lp) ? dc_gain :
-		       (options & opt_hp) ? hf_gain :
-		       (options & (opt_bp | opt_ap)) ? fc_gain :
-		       (options & opt_bs) ? csqrt(dc_gain * hf_gain) : complex(1.0);
-	printf("G  = %.10e\n", hypot(gain));
-	printcoeffs("NZ", zplane.numzeros, xcoeffs);
-	printcoeffs("NP", zplane.numpoles, ycoeffs);
-      }
-    else
-      { printf("Command line: ");
-	printcmdline(argv);
-	printfilter();
-      }
-  }
-
-static void printcmdline(char *argv[])
-  { int k = 0;
-    until (argv[k] == NULL)
-      { if (k > 0) putchar(' ');
-	fputs(argv[k++], stdout);
-      }
-    putchar('\n');
- }
-
-static void printcoeffs(const char *pz, int npz, double coeffs[])
-  { printf("%s = %d\n", pz, npz);
-    for (int i = 0; i <= npz; i++) printf("%18.10e\n", coeffs[i]);
-  }
-
-static void printfilter()
-  { printf("raw alpha1    = %14.10f\n", raw_alpha1);
-    printf("raw alpha2    = %14.10f\n", raw_alpha2);
-    unless (options & (opt_re | opt_w | opt_z))
-      { printf("warped alpha1 = %14.10f\n", warped_alpha1);
-	printf("warped alpha2 = %14.10f\n", warped_alpha2);
-      }
-    printgain("dc    ", dc_gain);
-    printgain("centre", fc_gain);
-    printgain("hf    ", hf_gain);
-    putchar('\n');
-    unless (options & opt_re) printrat_s();
-    printrat_z();
-    printrecurrence();
-  }
-
-static void printgain(const char *str, complex gain)
-  { double r = hypot(gain);
-    printf("gain at %s:   mag = %15.9e", str, r);
-    if (r > EPS) printf("   phase = %14.10f pi", atan2(gain) / PI);
-    putchar('\n');
-  }
-
-static void printrat_s()	/* print S-plane poles and zeros */
-  { printf("S-plane zeros:\n");
-    printpz(splane.zeros, splane.numzeros);
-    printf("S-plane poles:\n");
-    printpz(splane.poles, splane.numpoles);
-  }
-
-static void printrat_z()	/* print Z-plane poles and zeros */
-  { printf("Z-plane zeros:\n");
-    printpz(zplane.zeros, zplane.numzeros);
-    printf("Z-plane poles:\n");
-    printpz(zplane.poles, zplane.numpoles);
-  }
-
-static void printpz(complex *pzvec, int num)
-  { int n1 = 0;
-    while (n1 < num)
-      { putchar('\t'); prcomplex(pzvec[n1]);
-	int n2 = n1+1;
-	while (n2 < num && pzvec[n2] == pzvec[n1]) n2++;
-	if (n2-n1 > 1) printf("\t%d times", n2-n1);
-	putchar('\n');
-	n1 = n2;
-      }
-    putchar('\n');
-  }
-
-static void printrecurrence() /* given (real) Z-plane poles & zeros, compute & print recurrence relation */
-  { printf("Recurrence relation:\n");
-    printf("y[n] = ");
-    int i;
-    for (i = 0; i < zplane.numzeros+1; i++)
-      { if (i > 0) printf("     + ");
-	double x = xcoeffs[i];
-	double f = fmod(fabs(x), 1.0);
-	const char *fmt = (f < EPS || f > 1.0-EPS) ? "%3g" : "%14.10f";
-	putchar('('); printf(fmt, x); printf(" * x[n-%2d])\n", zplane.numzeros-i);
-      }
-    putchar('\n');
-    for (i = 0; i < zplane.numpoles; i++)
-      { printf("     + (%14.10f * y[n-%2d])\n", ycoeffs[i], zplane.numpoles-i);
-      }
-    putchar('\n');
-  }
-
-static void prcomplex(complex z)
-  { printf("%14.10f + j %14.10f", z.re, z.im);
   }
 

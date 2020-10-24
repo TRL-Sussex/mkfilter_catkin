@@ -66,17 +66,21 @@ struct pzrep
     int numpoles, numzeros;
   };
 
-static pzrep splane, zplane;
-static int order;
-static double raw_alpha1, raw_alpha2, raw_alphaz;
-static complex dc_gain, fc_gain, hf_gain;
-static uint options;
-static double warped_alpha1, warped_alpha2, chebrip, qfactor;
-static bool infq;
-static uint polemask;
-static double xcoeffs[MAXPZ+1], ycoeffs[MAXPZ+1];
+//Variables for thread safety
+struct Data_t {
+    pzrep splane, zplane;
+    int order;
+    double raw_alpha1, raw_alpha2, raw_alphaz;
+    complex dc_gain, fc_gain, hf_gain;
+    uint options;
+    double warped_alpha1, warped_alpha2, chebrip, qfactor;
+    bool infq;
+    uint polemask;
+    double xcoeffs[MAXPZ+1], ycoeffs[MAXPZ+1];
+    bool optsok;
+};
 
-static c_complex bessel_poles[] =
+const static c_complex bessel_poles[] =
   { /* table produced by /usr/fisher/bessel --	N.B. only one member of each C.Conj. pair is listed */
     { -1.00000000000e+00, 0.00000000000e+00}, { -1.10160133059e+00, 6.36009824757e-01},
     { -1.32267579991e+00, 0.00000000000e+00}, { -1.04740916101e+00, 9.99264436281e-01},
@@ -95,18 +99,18 @@ static c_complex bessel_poles[] =
     { -1.36069227838e+00, 1.73350574267e+00}, { -8.65756901707e-01, 2.29260483098e+00},
   };
 
-static void readcmdline(char*[]);
+static void readcmdline(char*[], struct Data_t& data);
 static uint decodeoptions(char*), optbit(char);
 static double getfarg(char*);
 static int getiarg(char*);
-static void usage(), checkoptions(), opterror(const char*, int = 0, int = 0), setdefaults();
-static void compute_s(), choosepole(complex), prewarp(), normalize(), compute_z_blt();
+static void usage(), checkoptions(struct Data_t& data), opterror(struct Data_t& data, const char*, int = 0, int = 0), setdefaults(struct Data_t& data);
+static void compute_s(struct Data_t& data), choosepole(struct Data_t& data, complex), prewarp(struct Data_t& data), normalize(struct Data_t& data), compute_z_blt(struct Data_t& data);
 static complex blt(complex);
-static void compute_z_mzt();
-static void compute_notch(), compute_apres();
+static void compute_z_mzt(struct Data_t& data);
+static void compute_notch(struct Data_t& data), compute_apres(struct Data_t& data);
 static complex reflect(complex);
-static void compute_bpres(), add_extra_zero();
-static void expandpoly(), expand(complex[], int, complex[]), multin(complex, int, complex[]);
+static void compute_bpres(struct Data_t& data), add_extra_zero(struct Data_t& data);
+static void expandpoly(struct Data_t& data), expand(complex[], int, complex[]), multin(complex, int, complex[]);
 
 
 void mkfilter_process(
@@ -117,74 +121,77 @@ void mkfilter_process(
     double& argGain)
   { 
     (void)argc;
-    readcmdline(argv);
-    checkoptions();
-    setdefaults();
-    if (options & opt_re)
-      { if (options & opt_bp) compute_bpres();	   /* bandpass resonator	 */
-	if (options & opt_bs) compute_notch();	   /* bandstop resonator (notch) */
-	if (options & opt_ap) compute_apres();	   /* allpass resonator		 */
+    struct Data_t data;
+    readcmdline(argv, data);
+    checkoptions(data);
+    setdefaults(data);
+    if (data.options & opt_re)
+      { if (data.options & opt_bp) compute_bpres(data);	   /* bandpass resonator	 */
+	if (data.options & opt_bs) compute_notch(data);	   /* bandstop resonator (notch) */
+	if (data.options & opt_ap) compute_apres(data);	   /* allpass resonator		 */
       }
     else
-      { if (options & opt_pi)
-	  { prewarp();
-	    splane.poles[0] = 0.0;
-	    splane.zeros[0] = -TWOPI * warped_alpha1;
-	    splane.numpoles = splane.numzeros = 1;
+      { if (data.options & opt_pi)
+	  { prewarp(data);
+	    data.splane.poles[0] = 0.0;
+	    data.splane.zeros[0] = -TWOPI * data.warped_alpha1;
+	    data.splane.numpoles = data.splane.numzeros = 1;
 	  }
 	else
-	  { compute_s();
-	    prewarp();
-	    normalize();
+	  { compute_s(data);
+	    prewarp(data);
+	    normalize(data);
 	  }
-	if (options & opt_z) compute_z_mzt(); else compute_z_blt();
+	if (data.options & opt_z) compute_z_mzt(data); else compute_z_blt(data);
       }
-    if (options & opt_Z) add_extra_zero();
-    expandpoly();
+    if (data.options & opt_Z) add_extra_zero(data);
+    expandpoly(data);
 
     //Assign results
-    complex gain = (options & opt_pi) ? hf_gain :
-        (options & opt_lp) ? dc_gain :
-        (options & opt_hp) ? hf_gain :
-        (options & (opt_bp | opt_ap)) ? fc_gain :
-        (options & opt_bs) ? csqrt(dc_gain * hf_gain) : complex(1.0);
+    complex gain = (data.options & opt_pi) ? data.hf_gain :
+        (data.options & opt_lp) ? data.dc_gain :
+        (data.options & opt_hp) ? data.hf_gain :
+        (data.options & (opt_bp | opt_ap)) ? data.fc_gain :
+        (data.options & opt_bs) ? csqrt(data.dc_gain * data.hf_gain) : complex(1.0);
     argGain = hypot(gain);
-    argCoefIn.assign(zplane.numzeros+1, 0.0);
-    argCoefOut.assign(zplane.numpoles+1, 0.0);
-    for (size_t i=0;i<(size_t)zplane.numzeros+1;i++) {
-        argCoefIn[zplane.numzeros-i] = xcoeffs[i];
+    argCoefIn.assign(data.zplane.numzeros+1, 0.0);
+    argCoefOut.assign(data.zplane.numpoles+1, 0.0);
+    for (size_t i=0;i<(size_t)data.zplane.numzeros+1;i++) {
+        argCoefIn[data.zplane.numzeros-i] = data.xcoeffs[i];
     }
-    for (size_t i=0;i<(size_t)zplane.numpoles;i++) {
-        argCoefOut[zplane.numpoles-i] = ycoeffs[i];
+    for (size_t i=0;i<(size_t)data.zplane.numpoles;i++) {
+        argCoefOut[data.zplane.numpoles-i] = data.ycoeffs[i];
     }
   }
 
-static void readcmdline(char *argv[])
-  { options = order = polemask = 0;
+static void readcmdline(char *argv[], struct Data_t& data)
+  { data.options = 0;
+    data.order = 0;
+    data.polemask = 0;
     int ap = 0;
     unless (argv[ap] == NULL) ap++; /* skip program name */
     until (argv[ap] == NULL)
       { uint m = decodeoptions(argv[ap++]);
-	if (m & opt_ch) chebrip = getfarg(argv[ap++]);
+	if (m & opt_ch) data.chebrip = getfarg(argv[ap++]);
 	if (m & opt_a)
-	  { raw_alpha1 = getfarg(argv[ap++]);
-	    raw_alpha2 = (argv[ap] != NULL && argv[ap][0] != '-') ? getfarg(argv[ap++]) : raw_alpha1;
+	  { data.raw_alpha1 = getfarg(argv[ap++]);
+	    data.raw_alpha2 = (argv[ap] != NULL && argv[ap][0] != '-') ? getfarg(argv[ap++]) : data.raw_alpha1;
 	  }
-	if (m & opt_Z) raw_alphaz = getfarg(argv[ap++]);
-	if (m & opt_o) order = getiarg(argv[ap++]);
+	if (m & opt_Z) data.raw_alphaz = getfarg(argv[ap++]);
+	if (m & opt_o) data.order = getiarg(argv[ap++]);
 	if (m & opt_p)
 	  { while (argv[ap] != NULL && argv[ap][0] >= '0' && argv[ap][0] <= '9')
 	      { int p = atoi(argv[ap++]);
 		if (p < 0 || p > 31) p = 31; /* out-of-range value will be picked up later */
-		polemask |= (1 << p);
+		data.polemask |= (1 << p);
 	      }
 	  }
 	if (m & opt_re)
 	  { char *s = argv[ap++];
-	    if (s != NULL && seq(s,"Inf")) infq = true;
-	    else { qfactor = getfarg(s); infq = false; }
+	    if (s != NULL && seq(s,"Inf")) data.infq = true;
+	    else { data.qfactor = getfarg(s); data.infq = false; }
 	  }
-	options |= m;
+	data.options |= m;
       }
   }
 
@@ -254,195 +261,193 @@ static void usage()
     throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
   }
 
-static bool optsok;
-
-static void checkoptions()
-  { optsok = true;
-    unless (onebit(options & (opt_be | opt_bu | opt_ch | opt_re | opt_pi)))
-      opterror("must specify exactly one of -Be, -Bu, -Ch, -Re, -Pi");
-    if (options & opt_re)
-      { unless (onebit(options & (opt_bp | opt_bs | opt_ap)))
-	  opterror("must specify exactly one of -Bp, -Bs, -Ap with -Re");
-	if (options & (opt_lp | opt_hp | opt_o | opt_p | opt_w | opt_z))
-	  opterror("can't use -Lp, -Hp, -o, -p, -w, -z with -Re");
+static void checkoptions(struct Data_t& data)
+  { data.optsok = true;
+    unless (onebit(data.options & (opt_be | opt_bu | opt_ch | opt_re | opt_pi)))
+      opterror(data, "must specify exactly one of -Be, -Bu, -Ch, -Re, -Pi");
+    if (data.options & opt_re)
+      { unless (onebit(data.options & (opt_bp | opt_bs | opt_ap)))
+	  opterror(data, "must specify exactly one of -Bp, -Bs, -Ap with -Re");
+	if (data.options & (opt_lp | opt_hp | opt_o | opt_p | opt_w | opt_z))
+	  opterror(data, "can't use -Lp, -Hp, -o, -p, -w, -z with -Re");
       }
-    else if (options & opt_pi)
-      { if (options & (opt_lp | opt_hp | opt_bp | opt_bs | opt_ap))
-	  opterror("-Lp, -Hp, -Bp, -Bs, -Ap illegal in conjunction with -Pi");
-	unless ((options & opt_o) && (order == 1)) opterror("-Pi implies -o 1");
+    else if (data.options & opt_pi)
+      { if (data.options & (opt_lp | opt_hp | opt_bp | opt_bs | opt_ap))
+	  opterror(data, "-Lp, -Hp, -Bp, -Bs, -Ap illegal in conjunction with -Pi");
+	unless ((data.options & opt_o) && (data.order == 1)) opterror(data, "-Pi implies -o 1");
       }
     else
-      { unless (onebit(options & (opt_lp | opt_hp | opt_bp | opt_bs)))
-	  opterror("must specify exactly one of -Lp, -Hp, -Bp, -Bs");
-	if (options & opt_ap) opterror("-Ap implies -Re");
-	if (options & opt_o)
-	  { unless (order >= 1 && order <= MAXORDER) opterror("order must be in range 1 .. %d", MAXORDER);
-	    if (options & opt_p)
-	      { uint m = (1 << order) - 1; /* "order" bits set */
-		if ((polemask & ~m) != 0)
-		  opterror("order=%d, so args to -p must be in range 0 .. %d", order, order-1);
+      { unless (onebit(data.options & (opt_lp | opt_hp | opt_bp | opt_bs)))
+	  opterror(data, "must specify exactly one of -Lp, -Hp, -Bp, -Bs");
+	if (data.options & opt_ap) opterror(data, "-Ap implies -Re");
+	if (data.options & opt_o)
+	  { unless (data.order >= 1 && data.order <= MAXORDER) opterror(data, "order must be in range 1 .. %d", MAXORDER);
+	    if (data.options & opt_p)
+	      { uint m = (1 << data.order) - 1; /* "order" bits set */
+		if ((data.polemask & ~m) != 0)
+		  opterror(data, "order=%d, so args to -p must be in range 0 .. %d", data.order, data.order-1);
 	      }
 	  }
-	else opterror("must specify -o");
+	else opterror(data, "must specify -o");
       }
-    unless (options & opt_a) opterror("must specify -a");
-    unless (optsok) throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
+    unless (data.options & opt_a) opterror(data, "must specify -a");
+    unless (data.optsok) throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
   }
 
-static void opterror(const char *msg, int p1, int p2)
+static void opterror(struct Data_t& data, const char *msg, int p1, int p2)
   { fprintf(stderr, "mkfilter: "); fprintf(stderr, msg, p1, p2); putc('\n', stderr);
-    optsok = false;
+    data.optsok = false;
   }
 
-static void setdefaults()
-  { unless (options & opt_p) polemask = ~0; /* use all poles */
-    unless (options & (opt_bp | opt_bs)) raw_alpha2 = raw_alpha1;
+static void setdefaults(struct Data_t& data)
+  { unless (data.options & opt_p) data.polemask = ~0; /* use all poles */
+    unless (data.options & (opt_bp | opt_bs)) data.raw_alpha2 = data.raw_alpha1;
   }
 
-static void compute_s() /* compute S-plane poles for prototype LP filter */
-  { splane.numpoles = 0;
-    if (options & opt_be)
+static void compute_s(struct Data_t& data) /* compute S-plane poles for prototype LP filter */
+  { data.splane.numpoles = 0;
+    if (data.options & opt_be)
       { /* Bessel filter */
-	int p = (order*order)/4; /* ptr into table */
-	if (order & 1) choosepole(bessel_poles[p++]);
-	for (int i = 0; i < order/2; i++)
-	  { choosepole(bessel_poles[p]);
-	    choosepole(cconj(bessel_poles[p]));
+	int p = (data.order*data.order)/4; /* ptr into table */
+	if (data.order & 1) choosepole(data, bessel_poles[p++]);
+	for (int i = 0; i < data.order/2; i++)
+	  { choosepole(data, bessel_poles[p]);
+	    choosepole(data, cconj(bessel_poles[p]));
 	    p++;
 	  }
       }
-    if (options & (opt_bu | opt_ch))
+    if (data.options & (opt_bu | opt_ch))
       { /* Butterworth filter */
-	for (int i = 0; i < 2*order; i++)
-	  { double theta = (order & 1) ? (i*PI) / order : ((i+0.5)*PI) / order;
-	    choosepole(expj(theta));
+	for (int i = 0; i < 2*data.order; i++)
+	  { double theta = (data.order & 1) ? (i*PI) / data.order : ((i+0.5)*PI) / data.order;
+	    choosepole(data, expj(theta));
 	  }
       }
-    if (options & opt_ch)
+    if (data.options & opt_ch)
       { /* modify for Chebyshev (p. 136 DeFatta et al.) */
-	if (chebrip >= 0.0)
-	  { fprintf(stderr, "mkfilter: Chebyshev ripple is %g dB; must be .lt. 0.0\n", chebrip);
+	if (data.chebrip >= 0.0)
+	  { fprintf(stderr, "mkfilter: Chebyshev ripple is %g dB; must be .lt. 0.0\n", data.chebrip);
             throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
 	  }
-	double rip = pow(10.0, -chebrip / 10.0);
+	double rip = pow(10.0, -data.chebrip / 10.0);
 	double eps = sqrt(rip - 1.0);
-	double y = asinh(1.0 / eps) / (double) order;
+	double y = asinh(1.0 / eps) / (double) data.order;
 	if (y <= 0.0)
 	  { fprintf(stderr, "mkfilter: bug: Chebyshev y=%g; must be .gt. 0.0\n", y);
             throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
 	  }
-	for (int i = 0; i < splane.numpoles; i++)
-	  { splane.poles[i].re *= sinh(y);
-	    splane.poles[i].im *= cosh(y);
+	for (int i = 0; i < data.splane.numpoles; i++)
+	  { data.splane.poles[i].re *= sinh(y);
+	    data.splane.poles[i].im *= cosh(y);
 	  }
       }
   }
 
-static void choosepole(complex z)
+static void choosepole(struct Data_t& data, complex z)
   { if (z.re < 0.0)
-      { if (polemask & 1) splane.poles[splane.numpoles++] = z;
-	polemask >>= 1;
+      { if (data.polemask & 1) data.splane.poles[data.splane.numpoles++] = z;
+	data.polemask >>= 1;
       }
   }
 
-static void prewarp()
+static void prewarp(struct Data_t& data)
   { /* for bilinear transform, perform pre-warp on alpha values */
-    if (options & (opt_w | opt_z))
-      { warped_alpha1 = raw_alpha1;
-	warped_alpha2 = raw_alpha2;
+    if (data.options & (opt_w | opt_z))
+      { data.warped_alpha1 = data.raw_alpha1;
+	data.warped_alpha2 = data.raw_alpha2;
       }
     else
-      { warped_alpha1 = tan(PI * raw_alpha1) / PI;
-	warped_alpha2 = tan(PI * raw_alpha2) / PI;
+      { data.warped_alpha1 = tan(PI * data.raw_alpha1) / PI;
+	data.warped_alpha2 = tan(PI * data.raw_alpha2) / PI;
       }
   }
 
-static void normalize()		/* called for trad, not for -Re or -Pi */
-  { double w1 = TWOPI * warped_alpha1;
-    double w2 = TWOPI * warped_alpha2;
+static void normalize(struct Data_t& data)		/* called for trad, not for -Re or -Pi */
+  { double w1 = TWOPI * data.warped_alpha1;
+    double w2 = TWOPI * data.warped_alpha2;
     /* transform prototype into appropriate filter type (lp/hp/bp/bs) */
-    switch (options & (opt_lp | opt_hp | opt_bp| opt_bs))
+    switch (data.options & (opt_lp | opt_hp | opt_bp| opt_bs))
       { case opt_lp:
-	  { for (int i = 0; i < splane.numpoles; i++) splane.poles[i] = splane.poles[i] * w1;
-	    splane.numzeros = 0;
+	  { for (int i = 0; i < data.splane.numpoles; i++) data.splane.poles[i] = data.splane.poles[i] * w1;
+	    data.splane.numzeros = 0;
 	    break;
 	  }
 
 	case opt_hp:
 	  { int i;
-	    for (i=0; i < splane.numpoles; i++) splane.poles[i] = w1 / splane.poles[i];
-	    for (i=0; i < splane.numpoles; i++) splane.zeros[i] = 0.0;	 /* also N zeros at (0,0) */
-	    splane.numzeros = splane.numpoles;
+	    for (i=0; i < data.splane.numpoles; i++) data.splane.poles[i] = w1 / data.splane.poles[i];
+	    for (i=0; i < data.splane.numpoles; i++) data.splane.zeros[i] = 0.0;	 /* also N zeros at (0,0) */
+	    data.splane.numzeros = data.splane.numpoles;
 	    break;
 	  }
 
 	case opt_bp:
 	  { double w0 = sqrt(w1*w2), bw = w2-w1; int i;
-	    for (i=0; i < splane.numpoles; i++)
-	      { complex hba = 0.5 * (splane.poles[i] * bw);
+	    for (i=0; i < data.splane.numpoles; i++)
+	      { complex hba = 0.5 * (data.splane.poles[i] * bw);
 		complex temp = csqrt(1.0 - sqr(w0 / hba));
-		splane.poles[i] = hba * (1.0 + temp);
-		splane.poles[splane.numpoles+i] = hba * (1.0 - temp);
+		data.splane.poles[i] = hba * (1.0 + temp);
+		data.splane.poles[data.splane.numpoles+i] = hba * (1.0 - temp);
 	      }
-	    for (i=0; i < splane.numpoles; i++) splane.zeros[i] = 0.0;	 /* also N zeros at (0,0) */
-	    splane.numzeros = splane.numpoles;
-	    splane.numpoles *= 2;
+	    for (i=0; i < data.splane.numpoles; i++) data.splane.zeros[i] = 0.0;	 /* also N zeros at (0,0) */
+	    data.splane.numzeros = data.splane.numpoles;
+	    data.splane.numpoles *= 2;
 	    break;
 	  }
 
 	case opt_bs:
 	  { double w0 = sqrt(w1*w2), bw = w2-w1; int i;
-	    for (i=0; i < splane.numpoles; i++)
-	      { complex hba = 0.5 * (bw / splane.poles[i]);
+	    for (i=0; i < data.splane.numpoles; i++)
+	      { complex hba = 0.5 * (bw / data.splane.poles[i]);
 		complex temp = csqrt(1.0 - sqr(w0 / hba));
-		splane.poles[i] = hba * (1.0 + temp);
-		splane.poles[splane.numpoles+i] = hba * (1.0 - temp);
+		data.splane.poles[i] = hba * (1.0 + temp);
+		data.splane.poles[data.splane.numpoles+i] = hba * (1.0 - temp);
 	      }
-	    for (i=0; i < splane.numpoles; i++)	   /* also 2N zeros at (0, +-w0) */
-	      { splane.zeros[i] = complex(0.0, +w0);
-		splane.zeros[splane.numpoles+i] = complex(0.0, -w0);
+	    for (i=0; i < data.splane.numpoles; i++)	   /* also 2N zeros at (0, +-w0) */
+	      { data.splane.zeros[i] = complex(0.0, +w0);
+		data.splane.zeros[data.splane.numpoles+i] = complex(0.0, -w0);
 	      }
-	    splane.numpoles *= 2;
-	    splane.numzeros = splane.numpoles;
+	    data.splane.numpoles *= 2;
+	    data.splane.numzeros = data.splane.numpoles;
 	    break;
 	  }
       }
   }
 
-static void compute_z_blt() /* given S-plane poles & zeros, compute Z-plane poles & zeros, by bilinear transform */
+static void compute_z_blt(struct Data_t& data) /* given S-plane poles & zeros, compute Z-plane poles & zeros, by bilinear transform */
   { int i;
-    zplane.numpoles = splane.numpoles;
-    zplane.numzeros = splane.numzeros;
-    for (i=0; i < zplane.numpoles; i++) zplane.poles[i] = blt(splane.poles[i]);
-    for (i=0; i < zplane.numzeros; i++) zplane.zeros[i] = blt(splane.zeros[i]);
-    while (zplane.numzeros < zplane.numpoles) zplane.zeros[zplane.numzeros++] = -1.0;
+    data.zplane.numpoles = data.splane.numpoles;
+    data.zplane.numzeros = data.splane.numzeros;
+    for (i=0; i < data.zplane.numpoles; i++) data.zplane.poles[i] = blt(data.splane.poles[i]);
+    for (i=0; i < data.zplane.numzeros; i++) data.zplane.zeros[i] = blt(data.splane.zeros[i]);
+    while (data.zplane.numzeros < data.zplane.numpoles) data.zplane.zeros[data.zplane.numzeros++] = -1.0;
   }
 
 static complex blt(complex pz)
   { return (2.0 + pz) / (2.0 - pz);
   }
 
-static void compute_z_mzt() /* given S-plane poles & zeros, compute Z-plane poles & zeros, by matched z-transform */
+static void compute_z_mzt(struct Data_t& data) /* given S-plane poles & zeros, compute Z-plane poles & zeros, by matched z-transform */
   { int i;
-    zplane.numpoles = splane.numpoles;
-    zplane.numzeros = splane.numzeros;
-    for (i=0; i < zplane.numpoles; i++) zplane.poles[i] = cexp(splane.poles[i]);
-    for (i=0; i < zplane.numzeros; i++) zplane.zeros[i] = cexp(splane.zeros[i]);
+    data.zplane.numpoles = data.splane.numpoles;
+    data.zplane.numzeros = data.splane.numzeros;
+    for (i=0; i < data.zplane.numpoles; i++) data.zplane.poles[i] = cexp(data.splane.poles[i]);
+    for (i=0; i < data.zplane.numzeros; i++) data.zplane.zeros[i] = cexp(data.splane.zeros[i]);
   }
 
-static void compute_notch()
+static void compute_notch(struct Data_t& data)
   { /* compute Z-plane pole & zero positions for bandstop resonator (notch filter) */
-    compute_bpres();		/* iterate to place poles */
-    double theta = TWOPI * raw_alpha1;
+    compute_bpres(data);		/* iterate to place poles */
+    double theta = TWOPI * data.raw_alpha1;
     complex zz = expj(theta);	/* place zeros exactly */
-    zplane.zeros[0] = zz; zplane.zeros[1] = cconj(zz);
+    data.zplane.zeros[0] = zz; data.zplane.zeros[1] = cconj(zz);
   }
 
-static void compute_apres()
+static void compute_apres(struct Data_t& data)
   { /* compute Z-plane pole & zero positions for allpass resonator */
-    compute_bpres();		/* iterate to place poles */
-    zplane.zeros[0] = reflect(zplane.poles[0]);
-    zplane.zeros[1] = reflect(zplane.poles[1]);
+    compute_bpres(data);		/* iterate to place poles */
+    data.zplane.zeros[0] = reflect(data.zplane.poles[0]);
+    data.zplane.zeros[1] = reflect(data.zplane.poles[1]);
   }
 
 static complex reflect(complex z)
@@ -450,27 +455,27 @@ static complex reflect(complex z)
     return z / sqr(r);
   }
 
-static void compute_bpres()
+static void compute_bpres(struct Data_t& data)
   { /* compute Z-plane pole & zero positions for bandpass resonator */
-    zplane.numpoles = zplane.numzeros = 2;
-    zplane.zeros[0] = 1.0; zplane.zeros[1] = -1.0;
-    double theta = TWOPI * raw_alpha1; /* where we want the peak to be */
-    if (infq)
+    data.zplane.numpoles = data.zplane.numzeros = 2;
+    data.zplane.zeros[0] = 1.0; data.zplane.zeros[1] = -1.0;
+    double theta = TWOPI * data.raw_alpha1; /* where we want the peak to be */
+    if (data.infq)
       { /* oscillator */
 	complex zp = expj(theta);
-	zplane.poles[0] = zp; zplane.poles[1] = cconj(zp);
+	data.zplane.poles[0] = zp; data.zplane.poles[1] = cconj(zp);
       }
     else
       { /* must iterate to find exact pole positions */
-	complex topcoeffs[MAXPZ+1]; expand(zplane.zeros, zplane.numzeros, topcoeffs);
-	double r = exp(-theta / (2.0 * qfactor));
+	complex topcoeffs[MAXPZ+1]; expand(data.zplane.zeros, data.zplane.numzeros, topcoeffs);
+	double r = exp(-theta / (2.0 * data.qfactor));
 	double thm = theta, th1 = 0.0, th2 = PI;
 	bool cvg = false;
 	for (int i=0; i < 50 && !cvg; i++)
 	  { complex zp = r * expj(thm);
-	    zplane.poles[0] = zp; zplane.poles[1] = cconj(zp);
-	    complex botcoeffs[MAXPZ+1]; expand(zplane.poles, zplane.numpoles, botcoeffs);
-	    complex g = evaluate(topcoeffs, zplane.numzeros, botcoeffs, zplane.numpoles, expj(theta));
+	    data.zplane.poles[0] = zp; data.zplane.poles[1] = cconj(zp);
+	    complex botcoeffs[MAXPZ+1]; expand(data.zplane.poles, data.zplane.numpoles, botcoeffs);
+	    complex g = evaluate(topcoeffs, data.zplane.numzeros, botcoeffs, data.zplane.numpoles, expj(theta));
 	    double phi = g.im / g.re; /* approx to atan2 */
 	    if (phi > 0.0) th2 = thm; else th1 = thm;
 	    if (fabs(phi) < EPS) cvg = true;
@@ -480,28 +485,28 @@ static void compute_bpres()
       }
   }
 
-static void add_extra_zero()
-  { if (zplane.numzeros+2 > MAXPZ)
+static void add_extra_zero(struct Data_t& data)
+  { if (data.zplane.numzeros+2 > MAXPZ)
       { fprintf(stderr, "mkfilter: too many zeros; can't do -Z\n");
         throw std::logic_error("mkfilter::MKFilter: Invalid usage.");
       }
-    double theta = TWOPI * raw_alphaz;
+    double theta = TWOPI * data.raw_alphaz;
     complex zz = expj(theta);
-    zplane.zeros[zplane.numzeros++] = zz;
-    zplane.zeros[zplane.numzeros++] = cconj(zz);
-    while (zplane.numpoles < zplane.numzeros) zplane.poles[zplane.numpoles++] = 0.0;	 /* ensure causality */
+    data.zplane.zeros[data.zplane.numzeros++] = zz;
+    data.zplane.zeros[data.zplane.numzeros++] = cconj(zz);
+    while (data.zplane.numpoles < data.zplane.numzeros) data.zplane.poles[data.zplane.numpoles++] = 0.0;	 /* ensure causality */
   }
 
-static void expandpoly() /* given Z-plane poles & zeros, compute top & bot polynomials in Z, and then recurrence relation */
+static void expandpoly(struct Data_t& data) /* given Z-plane poles & zeros, compute top & bot polynomials in Z, and then recurrence relation */
   { complex topcoeffs[MAXPZ+1], botcoeffs[MAXPZ+1]; int i;
-    expand(zplane.zeros, zplane.numzeros, topcoeffs);
-    expand(zplane.poles, zplane.numpoles, botcoeffs);
-    dc_gain = evaluate(topcoeffs, zplane.numzeros, botcoeffs, zplane.numpoles, 1.0);
-    double theta = TWOPI * 0.5 * (raw_alpha1 + raw_alpha2); /* "jwT" for centre freq. */
-    fc_gain = evaluate(topcoeffs, zplane.numzeros, botcoeffs, zplane.numpoles, expj(theta));
-    hf_gain = evaluate(topcoeffs, zplane.numzeros, botcoeffs, zplane.numpoles, -1.0);
-    for (i = 0; i <= zplane.numzeros; i++) xcoeffs[i] = +(topcoeffs[i].re / botcoeffs[zplane.numpoles].re);
-    for (i = 0; i <= zplane.numpoles; i++) ycoeffs[i] = -(botcoeffs[i].re / botcoeffs[zplane.numpoles].re);
+    expand(data.zplane.zeros, data.zplane.numzeros, topcoeffs);
+    expand(data.zplane.poles, data.zplane.numpoles, botcoeffs);
+    data.dc_gain = evaluate(topcoeffs, data.zplane.numzeros, botcoeffs, data.zplane.numpoles, 1.0);
+    double theta = TWOPI * 0.5 * (data.raw_alpha1 + data.raw_alpha2); /* "jwT" for centre freq. */
+    data.fc_gain = evaluate(topcoeffs, data.zplane.numzeros, botcoeffs, data.zplane.numpoles, expj(theta));
+    data.hf_gain = evaluate(topcoeffs, data.zplane.numzeros, botcoeffs, data.zplane.numpoles, -1.0);
+    for (i = 0; i <= data.zplane.numzeros; i++) data.xcoeffs[i] = +(topcoeffs[i].re / botcoeffs[data.zplane.numpoles].re);
+    for (i = 0; i <= data.zplane.numpoles; i++) data.ycoeffs[i] = -(botcoeffs[i].re / botcoeffs[data.zplane.numpoles].re);
   }
 
 static void expand(complex pz[], int npz, complex coeffs[])

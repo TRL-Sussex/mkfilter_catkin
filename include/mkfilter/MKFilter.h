@@ -37,8 +37,7 @@ enum class PassType_t {
  * See https://www-users.cs.york.ac.uk/~fisher/mkfilter/
  *
  * Throw std::logic_error if an error occurs.
- * The impleme,tation is NOT thread safe 
- * (use static global variable).
+ * The implementation is thread safe.
  *
  * Gain and IIR coefficient are defined by:
  * sIn = coefIn.size()
